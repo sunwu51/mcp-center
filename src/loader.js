@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { log as logMessage, warn as logWarn, error as logError } from './log.js';
 import {
   callWsBridgeTool,
   getWsBridgeTools,
@@ -175,7 +176,7 @@ async function loadServerCapabilities(client, config) {
       mimeType: resource.mimeType,
     }));
   } else {
-    console.warn(`[mcp-center] Server ${config.name} does not support resources:`, resourcesResponse.reason?.message || String(resourcesResponse.reason));
+    logWarn(`[mcp-center] Server ${config.name} does not support resources:`, resourcesResponse.reason?.message || String(resourcesResponse.reason));
   }
 
   let resourceTemplates = [];
@@ -192,7 +193,7 @@ async function loadServerCapabilities(client, config) {
       mimeType: rt.mimeType,
     }));
   } else {
-    console.warn(`[mcp-center] Server ${config.name} does not support resource templates:`, resourceTemplatesResponse.reason?.message || String(resourceTemplatesResponse.reason));
+    logWarn(`[mcp-center] Server ${config.name} does not support resource templates:`, resourceTemplatesResponse.reason?.message || String(resourceTemplatesResponse.reason));
   }
 
   let prompts = [];
@@ -208,7 +209,7 @@ async function loadServerCapabilities(client, config) {
       arguments: prompt.arguments || [],
     }));
   } else {
-    console.warn(`[mcp-center] Server ${config.name} does not support prompts:`, promptsResponse.reason?.message || String(promptsResponse.reason));
+    logWarn(`[mcp-center] Server ${config.name} does not support prompts:`, promptsResponse.reason?.message || String(promptsResponse.reason));
   }
 
   return { tools, resources, resourceTemplates, prompts };
@@ -222,14 +223,14 @@ async function loadServerCapabilities(client, config) {
 export async function loadAllServers(servers) {
   const loadPromises = servers.map(async (serverConfig) => {
     if (serverConfig.enabled === false) {
-      console.log(`[mcp-center] Skipping disabled server "${serverConfig.name}"`);
+      logMessage(`[mcp-center] Skipping disabled server "${serverConfig.name}"`);
       serverStatus.set(serverConfig.name, { status: 'disabled' });
       return;
     }
     try {
       await loadServer(serverConfig);
     } catch (error) {
-      console.error(`[mcp-center] Failed to load server "${serverConfig.name}":`, error);
+      logError(`[mcp-center] Failed to load server "${serverConfig.name}":`, error);
     }
   });
   
@@ -314,7 +315,7 @@ export function registerConnectedWsBridge(serverName, rawTools) {
     prompts: []
   });
   serverStatus.set(serverName, { status: 'connected' });
-  console.log(`[mcp-center] wsBridge "${serverName}" registered ${tools.length} tool(s)`);
+  logMessage(`[mcp-center] wsBridge "${serverName}" registered ${tools.length} tool(s)`);
 }
 
 /**
@@ -324,7 +325,7 @@ export function registerConnectedWsBridge(serverName, rawTools) {
 export function unregisterWsBridgeServer(serverName) {
   loadedServers.delete(serverName);
   serverStatus.set(serverName, { status: 'failed', error: 'WebSocket client disconnected' });
-  console.log(`[mcp-center] wsBridge "${serverName}" disconnected`);
+  logMessage(`[mcp-center] wsBridge "${serverName}" disconnected`);
 }
 
 /**
@@ -334,7 +335,7 @@ export function unregisterWsBridgeServer(serverName) {
  */
 export async function loadServer(config) {
   const transportType = config.url ? 'http' : 'stdio';
-  console.log(`[mcp-center] Loading server "${config.name}" (${transportType} transport)`);
+  logMessage(`[mcp-center] Loading server "${config.name}" (${transportType} transport)`);
   serverStatus.set(config.name, { status: 'loading' });
 
   let loadedServer;
@@ -346,12 +347,12 @@ export async function loadServer(config) {
     }
   } catch (error) {
     const errMsg = error.message || String(error);
-    console.error(`[mcp-center] Failed to load server "${config.name}": ${errMsg}`);
+    logError(`[mcp-center] Failed to load server "${config.name}": ${errMsg}`);
     serverStatus.set(config.name, { status: 'failed', error: errMsg });
     throw error;
   }
 
-  console.log(`[mcp-center] Loaded ${loadedServer.tools.length} tool(s), ${loadedServer.resources.length} resource(s), ${loadedServer.resourceTemplates.length} resource template(s), ${loadedServer.prompts.length} prompt(s) from "${config.name}"`);
+  logMessage(`[mcp-center] Loaded ${loadedServer.tools.length} tool(s), ${loadedServer.resources.length} resource(s), ${loadedServer.resourceTemplates.length} resource template(s), ${loadedServer.prompts.length} prompt(s) from "${config.name}"`);
   loadedServer.config = cloneServerConfig(config);
   loadedServers.set(config.name, loadedServer);
   serverStatus.set(config.name, { status: 'connected' });
@@ -369,7 +370,7 @@ export async function reloadServer(config) {
 
   // If already loaded and config hasn't changed, skip reconnection
   if (existing && existing.config && !serverConfigChanged(existing.config, config)) {
-    console.log(`[mcp-center] Skipping unchanged server "${config.name}"`);
+    logMessage(`[mcp-center] Skipping unchanged server "${config.name}"`);
     return existing;
   }
 
@@ -378,7 +379,7 @@ export async function reloadServer(config) {
       try {
         await existing.client.close();
       } catch (error) {
-        console.warn(`[mcp-center] Error closing server ${config.name}:`, error);
+        logWarn(`[mcp-center] Error closing server ${config.name}:`, error);
       }
     }
     loadedServers.delete(config.name);
@@ -386,7 +387,7 @@ export async function reloadServer(config) {
   serverStatus.delete(config.name);
 
   if (config.enabled === false) {
-    console.log(`[mcp-center] Skipping disabled server "${config.name}"`);
+    logMessage(`[mcp-center] Skipping disabled server "${config.name}"`);
     serverStatus.set(config.name, { status: 'disabled' });
     return null;
   }
@@ -535,9 +536,9 @@ export async function closeAllServers() {
       if (server.client) {
         await server.client.close();
       }
-      console.log(`[mcp-center] Closed server "${name}"`);
+      logMessage(`[mcp-center] Closed server "${name}"`);
     } catch (error) {
-      console.warn(`[mcp-center] Error closing server "${name}":`, error);
+      logWarn(`[mcp-center] Error closing server "${name}":`, error);
     }
   }
   loadedServers.clear();

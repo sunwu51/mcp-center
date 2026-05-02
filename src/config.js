@@ -1,6 +1,7 @@
 import { readFileSync, existsSync, watchFile, unwatchFile, writeFileSync, mkdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { homedir } from 'os';
+import { error as logError } from './log.js';
 
 let currentConfig = null;
 let configPath = '';
@@ -86,15 +87,15 @@ export function watchConfig(callback) {
       ignoredWatchEvents -= 1;
       return;
     }
-    console.error('[mcp-center] Config file changed, reloading...');
+    logError('[mcp-center] Config file changed, reloading...');
     try {
       const newConfig = loadConfig(configPath);
-      console.error(`[mcp-center] Loaded ${newConfig.servers.length} server(s)`);
+      logError(`[mcp-center] Loaded ${newConfig.servers.length} server(s)`);
       if (reloadCallback) {
         reloadCallback();
       }
     } catch (error) {
-      console.error('[mcp-center] Error reloading config:', error);
+      logError('[mcp-center] Error reloading config:', error);
     }
   });
 }

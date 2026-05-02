@@ -3,6 +3,7 @@
 import { createServer as createHttpServer } from 'http';
 import { randomUUID } from 'crypto';
 import { UI_HTML } from './ui.js';
+import { warn as logWarn, error as logError } from './log.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -138,7 +139,7 @@ async function reloadAllServers() {
   const config = getConfig();
   if (!config) return;
 
-  console.error('[mcp-center] Reloading servers...');
+  logError('[mcp-center] Reloading servers...');
 
   const loadedServers = getLoadedServers();
   const currentServers = new Map(Array.from(loadedServers.entries()).map(([name, server]) => [name, server]));
@@ -150,9 +151,9 @@ async function reloadAllServers() {
       try {
         await loaded.client.close();
         loadedServers.delete(name);
-        console.error(`[mcp-center] Removed server "${name}"`);
+        logError(`[mcp-center] Removed server "${name}"`);
       } catch (error) {
-        console.warn(`[mcp-center] Error closing server "${name}":`, error);
+        logWarn(`[mcp-center] Error closing server "${name}":`, error);
       }
     }
   }
@@ -162,13 +163,13 @@ async function reloadAllServers() {
     try {
       await reloadServer(serverConfig);
     } catch (error) {
-      console.error(`[mcp-center] Failed to reload server "${serverConfig.name}":`, error);
+      logError(`[mcp-center] Failed to reload server "${serverConfig.name}":`, error);
     }
   });
 
   await Promise.all(reloadPromises);
 
-  console.error('[mcp-center] Reload complete');
+  logError('[mcp-center] Reload complete');
 }
 
 /**
@@ -195,7 +196,7 @@ function scheduleReloadAllServers() {
 
 function triggerReloadAllServers() {
   scheduleReloadAllServers().catch((error) => {
-    console.error('[mcp-center] Background reload failed:', error);
+    logError('[mcp-center] Background reload failed:', error);
   });
 }
 
@@ -406,19 +407,19 @@ async function runHttp(port) {
 
   await new Promise((resolve, reject) => {
     httpServer.listen(port, () => {
-      console.error(`[mcp-center] HTTP server running on http://localhost:${port}`);
-      console.error(`[mcp-center] UI available at http://localhost:${port}/ui`);
-      console.error(`[mcp-center] MCP endpoint at http://localhost:${port}/mcp`);
+      logError(`[mcp-center] HTTP server running on http://localhost:${port}`);
+      logError(`[mcp-center] UI available at http://localhost:${port}/ui`);
+      logError(`[mcp-center] MCP endpoint at http://localhost:${port}/mcp`);
       resolve();
     });
     httpServer.on('error', reject);
   });
 
   createWsServer(httpServer);
-  console.error(`[mcp-center] WebSocket bridge listening at ws://localhost:${port}/ws/:serverName`);
+  logError(`[mcp-center] WebSocket bridge listening at ws://localhost:${port}/ws/:serverName`);
 
   const shutdown = async () => {
-    console.error('[mcp-center] Shutting down...');
+    logError('[mcp-center] Shutting down...');
     unwatchConfig();
     closeWsBridgeServers();
     await closeAllServers();
@@ -438,10 +439,10 @@ async function runHttp(port) {
  */
 export async function runServer(configPath) {
   const path = configPath || ensureDefaultConfig();
-  console.error(`[mcp-center] Loading config from: ${path}`);
+  logError(`[mcp-center] Loading config from: ${path}`);
 
   const config = loadConfig(path);
-  console.error(`[mcp-center] Loaded ${config.servers.length} server(s) from config`);
+  logError(`[mcp-center] Loaded ${config.servers.length} server(s) from config`);
 
   await loadAllServers(config.servers);
 
@@ -449,7 +450,7 @@ export async function runServer(configPath) {
     triggerReloadAllServers();
   });
 
-  console.error('[mcp-center] Starting MCP Center server (HTTP transport)...');
+  logError('[mcp-center] Starting MCP Center server (HTTP transport)...');
 
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   await runHttp(port);
@@ -480,7 +481,7 @@ async function main() {
   try {
     await runServer(configPath);
   } catch (error) {
-    console.error('[mcp-center] Fatal error:', error);
+    logError('[mcp-center] Fatal error:', error);
     process.exit(1);
   }
 }

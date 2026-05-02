@@ -1,10 +1,12 @@
 import { WebSocketServer } from 'ws';
+import { error as logError } from './log.js';
 
 const TOOL_CALL_TIMEOUT_MS = 60000;
-const PING_INTERVAL_MS = 30000;
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
 
-const connections = new Map();   // name -> { ws, tools, rpcId, pingTimer }
-const pending = new Map();       // name -> Map<rpcId, {resolve, reject, timer}>
+const connections = new Map();   // name -> { ws, tools, rpcId, heartbeatTimer, heartbeatPending }
+const pending = new Map();       // name -> Map<rpcId, {resolve, reject, timer, resolveOnError}>
 
 let wss = null;
 
@@ -29,7 +31,7 @@ export function createWsServer(httpServer) {
         handleConnection(serverName, ws);
       });
     } catch (e) {
-      console.error(`[mcp-center] wsBridge upgrade error:`, e.message);
+      logError(`[mcp-center] wsBridge upgrade error:`, e.message);
       socket.destroy();
     }
   });
@@ -119,7 +121,7 @@ export function callWsBridgeTool(serverName, toolName, args) {
  */
 export function closeWsBridgeServers() {
   for (const [name, conn] of connections) {
-    try { clearInterval(conn.pingTimer); } catch (_) {}
+    try { clearInterval(conn.heartbeatTimer); } catch (_) {}
     try { conn.ws.close(); } catch (_) {}
     cleanupConnection(name);
   }
@@ -134,18 +136,13 @@ function handleConnection(serverName, ws) {
   // Close previous connection if exists
   const existing = connections.get(serverName);
   if (existing) {
-    try { clearInterval(existing.pingTimer); } catch (_) {}
+    try { clearInterval(existing.heartbeatTimer); } catch (_) {}
     try { existing.ws.close(); } catch (_) {}
     cleanupConnection(serverName);
   }
 
-  const conn = { ws, tools: [], rpcId: 0, pingTimer: null };
+  const conn = { ws, tools: [], rpcId: 0, heartbeatTimer: null, heartbeatPending: false };
   connections.set(serverName, conn);
-
-  // Start keepalive pings
-  conn.pingTimer = setInterval(() => {
-    try { ws.ping(); } catch (_) {}
-  }, PING_INTERVAL_MS);
 
   ws.on('message', (data) => {
     let msg;
@@ -156,13 +153,16 @@ function handleConnection(serverName, ws) {
       resolvePending(serverName, msg.id, msg.result);
     } else if (msg.id != null && msg.error) {
       rejectPending(serverName, msg.id, msg.error);
+    } else if (msg.id != null && msg.method) {
+      handleClientRequest(conn, msg);
     }
   });
 
   ws.on('close', () => {
     const current = connections.get(serverName);
     if (current && current.ws === ws) {
-      try { clearInterval(current.pingTimer); } catch (_) {}
+      try { clearInterval(current.heartbeatTimer); } catch (_) {}
+      current.heartbeatPending = false;
       cleanupConnection(serverName);
       if (typeof onWsBridgeDisconnected === 'function') {
         onWsBridgeDisconnected(serverName);
@@ -193,27 +193,31 @@ async function sendHandshake(serverName, conn) {
       onWsBridgeConnected(serverName, conn.tools);
     }
 
-    console.error(`[mcp-center] wsBridge "${serverName}" connected with ${conn.tools.length} tool(s)`);
+    startHeartbeat(serverName, conn);
+    logError(`[mcp-center] wsBridge "${serverName}" connected with ${conn.tools.length} tool(s)`);
   } catch (e) {
-    console.error(`[mcp-center] wsBridge "${serverName}" handshake failed:`, e.message);
-    try { clearInterval(conn.pingTimer); } catch (_) {}
+    logError(`[mcp-center] wsBridge "${serverName}" handshake failed:`, e.message);
+    try { clearInterval(conn.heartbeatTimer); } catch (_) {}
+    conn.heartbeatPending = false;
     conn.ws.close();
   }
 }
 
-function sendRpc(serverName, conn, method, params) {
+function sendRpc(serverName, conn, method, params, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 15000;
+  const resolveOnError = options.resolveOnError === true;
   const id = ++conn.rpcId;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       if (!pending.has(serverName)) return;
       pending.get(serverName).delete(id);
       reject(new Error(`RPC ${method} timed out`));
-    }, 15000);
+    }, timeoutMs);
 
     if (!pending.has(serverName)) {
       pending.set(serverName, new Map());
     }
-    pending.get(serverName).set(id, { resolve, reject, timer });
+    pending.get(serverName).set(id, { resolve, reject, timer, resolveOnError });
 
     try {
       conn.ws.send(JSON.stringify(
@@ -246,7 +250,59 @@ function rejectPending(serverName, id, error) {
   if (!entry) return;
   clearTimeout(entry.timer);
   map.delete(id);
+  if (entry.resolveOnError) {
+    entry.resolve({ error });
+    return;
+  }
   entry.reject(new Error(error.message || String(error)));
+}
+
+function startHeartbeat(serverName, conn) {
+  try { clearInterval(conn.heartbeatTimer); } catch (_) {}
+  conn.heartbeatPending = false;
+  conn.heartbeatTimer = setInterval(() => {
+    void sendHeartbeat(serverName, conn);
+  }, HEARTBEAT_INTERVAL_MS);
+  void sendHeartbeat(serverName, conn);
+}
+
+async function sendHeartbeat(serverName, conn) {
+  const current = connections.get(serverName);
+  if (!current || current !== conn || conn.heartbeatPending || conn.ws.readyState !== 1) {
+    return;
+  }
+
+  conn.heartbeatPending = true;
+  try {
+    await sendRpc(serverName, conn, 'ping', undefined, {
+      timeoutMs: HEARTBEAT_TIMEOUT_MS,
+      resolveOnError: true
+    });
+  } catch (_) {
+    const latest = connections.get(serverName);
+    if (latest && latest === conn) {
+      try { conn.ws.close(); } catch (_) {}
+    }
+  } finally {
+    conn.heartbeatPending = false;
+  }
+}
+
+function handleClientRequest(conn, msg) {
+  if (msg.method === 'ping') {
+    try {
+      conn.ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }));
+    } catch (_) {}
+    return;
+  }
+
+  try {
+    conn.ws.send(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      error: { code: -32601, message: `Method not found: ${msg.method}` }
+    }));
+  } catch (_) {}
 }
 
 function cleanupConnection(serverName) {
