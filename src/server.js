@@ -31,6 +31,7 @@ import {
 } from './loader.js';
 import { loadConfig, watchConfig, getConfig, ensureDefaultConfig, unwatchConfig, saveConfig } from './config.js';
 import { createWsServer, closeWsBridgeServers, getWsBridgeServers } from './wsBridge.js';
+import { getAuthConfig, isAuthorizedRequest, shouldProtectHttpPath, writeUnauthorized } from './auth.js';
 
 let reloadInFlight = null;
 let reloadQueued = false;
@@ -208,9 +209,17 @@ function triggerReloadAllServers() {
  */
 async function runHttp(port) {
   const sessions = new Map();
+  const authConfig = getAuthConfig();
 
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (shouldProtectHttpPath(url.pathname, authConfig) && !isAuthorizedRequest(req, {
+      config: authConfig,
+    })) {
+      writeUnauthorized(res);
+      return;
+    }
 
     // Serve UI
     if (url.pathname === '/' || url.pathname === '/ui') {
@@ -417,6 +426,9 @@ async function runHttp(port) {
 
   createWsServer(httpServer);
   logError(`[mcp-center] WebSocket bridge listening at ws://localhost:${port}/ws/:serverName`);
+  if (authConfig.enabled) {
+    logError('[mcp-center] Inbound auth enabled for /mcp and /api endpoints');
+  }
 
   const shutdown = async () => {
     logError('[mcp-center] Shutting down...');

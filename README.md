@@ -92,6 +92,28 @@ http://localhost:3000/mcp
 
 Your MCP client must support Streamable HTTP transport.
 
+## Inbound Authentication
+
+By default MCP Center keeps the local development behavior unchanged and does not require authentication. To protect the HTTP MCP endpoint and management API, set `MCP_CENTER_AUTH_TOKEN` before starting the server:
+
+```powershell
+$env:MCP_CENTER_AUTH_TOKEN='your-secret-token'
+npx @sunwu51/mcp-center
+```
+
+When this variable is set, clients must send:
+
+```http
+Authorization: Bearer your-secret-token
+```
+
+Protected endpoints:
+
+- `/mcp` and `/mcp/*`
+- `/api/*`
+
+The Web UI at `/ui` is a static page and is not protected directly. Its API calls will receive `401 Unauthorized` unless they include the bearer token. WebSocket bridge clients connecting to `/ws/:serverName` are not covered by this token check.
+
 ## WebSocket Bridge
 
 MCP Center also starts a WebSocket bridge server on the same port:
@@ -339,7 +361,7 @@ demo-agent_echo
 - Handshake/list requests time out after 15 seconds.
 - MCP Center sends WebSocket ping frames every 30 seconds as keepalive.
 - Server names are taken from the URL path and sanitized only when constructing aggregated tool names: characters outside `[a-zA-Z0-9_-]` become `_`.
-- There is no authentication or authorization on `/ws/:serverName` in the current implementation. If exposing MCP Center beyond localhost, put it behind a trusted network boundary or reverse proxy that enforces access control.
+- WebSocket bridge clients are not authenticated by `MCP_CENTER_AUTH_TOKEN`; they register by connecting to `/ws/:serverName`.
 
 ## How It Works
 
@@ -435,6 +457,21 @@ The exact client config depends on the client, but the target should be the MCP 
 ```
 
 If your client expects a transport field, use its Streamable HTTP mode and point it to the same URL.
+
+If inbound auth is enabled, configure the client to send an `Authorization` header:
+
+```json
+{
+  "mcpServers": {
+    "mcp-center": {
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-token"
+      }
+    }
+  }
+}
+```
 
 If you want to launch MCP Center from another tool or script, use the same `npx` entry:
 
