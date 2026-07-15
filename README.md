@@ -362,6 +362,80 @@ If a filtering field is omitted or empty, MCP Center exposes all items of that t
 
 Filtering does not apply to WebSocket bridge clients because they are not stored in the config file.
 
+## OAuth Authentication
+
+MCP Center supports importing HTTP MCP servers that require OAuth authentication. When `useOAuth: true` is set on a server config, MCP Center acts as an OAuth client and performs the full authorization flow:
+
+1. **Discovery**: MCP Center follows RFC 9728 to find the server's OAuth protected resource metadata, then RFC 8414 to find the authorization server metadata.
+2. **Dynamic client registration**: MCP Center registers itself as an OAuth client with the authorization server (RFC 7591).
+3. **Authorization**: MCP Center generates a PKCE challenge and constructs the authorization URL. Since MCP Center runs as a server process (not a browser app), it stores the authorization URL and surfaces it through the Web UI.
+4. **Token exchange**: After the user authorizes via their browser, the OAuth provider redirects back to MCP Center's `/oauth/callback` endpoint. MCP Center exchanges the authorization code for access and refresh tokens.
+5. **Token storage**: Tokens are persisted to `~/.mcp-center/oauth-tokens.json`, keyed by server name. They survive restarts.
+6. **Automatic refresh**: When a stored access token expires, the SDK automatically attempts to refresh it using the stored refresh token. If the refresh fails, MCP Center marks the server as `needs_auth` again.
+
+### Configuring an OAuth-protected server
+
+```json
+{
+  "servers": [
+    {
+      "name": "notion",
+      "url": "https://mcp.notion.com/mcp",
+      "useOAuth": true
+    }
+  ]
+}
+```
+
+You can still include `httpHeaders` for non-auth headers. When `useOAuth` is enabled, any `Authorization` header in `httpHeaders` is ignored — OAuth manages the bearer token.
+
+### Authorization flow in the UI
+
+1. Add a server with `useOAuth: true` (or edit an existing one and check the "Use OAuth Authentication" checkbox).
+2. Save the server. It will appear with a `needs auth` status badge.
+3. Click the **Authorize** button. Your browser opens the OAuth provider's login page.
+4. After you authorize, the browser redirects back to MCP Center, which exchanges the code for tokens and reloads the server automatically.
+5. The server status changes to `connected`.
+
+If the authorization URL has expired or you need to re-authorize, click **Re-authorize**.
+
+### OAuth token storage
+
+Tokens are stored at:
+
+```text
+~/.mcp-center/oauth-tokens.json
+```
+
+Each server entry contains:
+
+- `tokens` — access token, refresh token, expiry, scope
+- `clientInformation` — registered client ID (from dynamic registration)
+- `codeVerifier` — PKCE code verifier (temporary, cleared after token exchange)
+- `discoveryState` — cached RFC 9728 / RFC 8414 discovery results
+
+To clear stored credentials for a server, use the API:
+
+```text
+POST /api/servers/:name/oauth-clear
+```
+
+Or delete the server's entry from the tokens file manually.
+
+### OAuth API endpoints
+
+- `GET /api/servers/:name/auth-url` — get the current auth status and authorization URL for a server
+- `POST /api/servers/:name/reauth` — clear credentials and re-trigger the OAuth flow, returns a new authorization URL
+- `POST /api/servers/:name/oauth-clear` — clear stored OAuth credentials for a server
+- `GET /oauth/callback` — OAuth redirect callback endpoint (called by the OAuth provider after user authorization)
+
+### OAuth notes
+
+- The callback URL is `http://localhost:<port>/oauth/callback`. The port is determined by the `PORT` environment variable (default 3000).
+- MCP Center uses `token_endpoint_auth_method: 'none'` (public client) for dynamic registration, which is the standard for non-confidential clients.
+- Token refresh is handled automatically by the SDK. If a refresh fails, the server status changes to `needs_auth` and the user must re-authorize via the UI.
+- If MCP Center is exposed beyond localhost, the `/oauth/callback` endpoint has no authentication. Put it behind a trusted network boundary or reverse proxy.
+
 ## Configuration File
 
 The config file format is:
@@ -376,6 +450,12 @@ The config file format is:
         "Authorization": "Bearer YOUR_TOKEN"
       },
       "enabledTools": ["web_search_exa"]
+    },
+    {
+      "name": "notion",
+      "url": "https://mcp.notion.com/mcp",
+      "useOAuth": true,
+      "enabledTools": ["search", "create_page"]
     },
     {
       "name": "filesystem",
@@ -411,6 +491,7 @@ HTTP child server fields:
 
 - `url`: required for HTTP transport
 - `httpHeaders`: optional request headers
+- `useOAuth`: optional boolean, set `true` to enable OAuth authentication (RFC 9728 + RFC 8414 discovery, PKCE, dynamic client registration, token refresh)
 
 STDIO child server fields:
 
@@ -461,6 +542,10 @@ The Web UI uses these routes:
 - `GET /api/servers/:name/capabilities`: get loaded capabilities for a connected server
 - `GET /api/wsbridge/servers`: list currently connected WebSocket bridge servers
 - `POST /api/probe`: temporarily connect to a server config and inspect capabilities before saving
+- `GET /api/servers/:name/auth-url`: get OAuth auth status and authorization URL for a server
+- `POST /api/servers/:name/reauth`: clear OAuth credentials and re-trigger the OAuth flow
+- `POST /api/servers/:name/oauth-clear`: clear stored OAuth credentials for a server
+- `GET /oauth/callback`: OAuth redirect callback (called by the OAuth provider)
 
 ## Runtime Behavior
 

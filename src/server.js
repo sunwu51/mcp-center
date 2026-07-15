@@ -31,6 +31,12 @@ import {
 } from './loader.js';
 import { loadConfig, watchConfig, getConfig, ensureDefaultConfig, unwatchConfig, saveConfig } from './config.js';
 import { createWsServer, closeWsBridgeServers, getWsBridgeServers } from './wsBridge.js';
+import {
+  handleOAuthCallback,
+  getPendingAuth,
+  getAuthStatus,
+  clearStoredCredentials,
+} from './oauth.js';
 
 let reloadInFlight = null;
 let reloadQueued = false;
@@ -373,6 +379,152 @@ async function runHttp(port) {
     if (url.pathname === '/api/wsbridge/servers' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(getWsBridgeServers()));
+      return;
+    }
+
+    // API: Get OAuth auth URL for a server that needs authorization
+    if (url.pathname.match(/^\/api\/servers\/([^/]+)\/auth-url$/) && req.method === 'GET') {
+      const serverName = decodeURIComponent(url.pathname.split('/')[3]);
+      const config = getConfig();
+      const serverConfig = config.servers.find(s => s.name === serverName);
+      if (!serverConfig) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server not found' }));
+        return;
+      }
+      if (!serverConfig.useOAuth) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server does not use OAuth' }));
+        return;
+      }
+      const authStatus = getAuthStatus(serverName);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(authStatus));
+      return;
+    }
+
+    // API: Trigger re-authorization for a server (reloads to generate new auth URL)
+    if (url.pathname.match(/^\/api\/servers\/([^/]+)\/reauth$/) && req.method === 'POST') {
+      const serverName = decodeURIComponent(url.pathname.split('/')[3]);
+      const config = getConfig();
+      const serverConfig = config.servers.find(s => s.name === serverName);
+      if (!serverConfig) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server not found' }));
+        return;
+      }
+      if (!serverConfig.useOAuth) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server does not use OAuth' }));
+        return;
+      }
+
+      clearStoredCredentials(serverName);
+
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const { reloadServer, getLoadedServers } = await import('./loader.js');
+
+          const loadedServers = getLoadedServers();
+          const existing = loadedServers.get(serverName);
+          if (existing) {
+            if (existing.client) {
+              try { await existing.client.close(); } catch (_) {}
+            }
+            loadedServers.delete(serverName);
+          }
+
+          await reloadServer(serverConfig);
+          const pending = getPendingAuth(serverName);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            authUrl: pending?.url || null,
+            status: pending ? 'needs_auth' : 'connected',
+          }));
+        } catch (error) {
+          const pending = getPendingAuth(serverName);
+          if (pending) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              authUrl: pending.url,
+              status: 'needs_auth',
+            }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              authUrl: null,
+              status: 'needs_auth',
+              error: error.message,
+            }));
+          }
+        }
+      });
+      return;
+    }
+
+    // API: Clear OAuth credentials for a server
+    if (url.pathname.match(/^\/api\/servers\/([^/]+)\/oauth-clear$/) && req.method === 'POST') {
+      const serverName = decodeURIComponent(url.pathname.split('/')[3]);
+      clearStoredCredentials(serverName);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    // OAuth callback endpoint — receives redirect from OAuth provider
+    if (url.pathname === '/oauth/callback' && req.method === 'GET') {
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const errorParam = url.searchParams.get('error');
+
+      if (errorParam) {
+        const errorDesc = url.searchParams.get('error_description') || errorParam;
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2 style="color:#dc3545">Authorization Failed</h2>
+          <p>${errorDesc}</p>
+          <p><a href="/ui">Back to MCP Center</a></p>
+        </body></html>`);
+        return;
+      }
+
+      if (!code || !state) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center"><h2>Missing code or state parameter</h2><p><a href="/ui">Back to MCP Center</a></p></body></html>');
+        return;
+      }
+
+      try {
+        const { serverName } = await handleOAuthCallback(code, state);
+
+        const config = getConfig();
+        const serverConfig = config.servers.find(s => s.name === serverName);
+        if (serverConfig) {
+          const { reloadServer } = await import('./loader.js');
+          await reloadServer(serverConfig);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2 style="color:#28a745">Authorization Successful</h2>
+          <p>Server "${serverName}" has been authorized and reloaded.</p>
+          <p><a href="/ui">Back to MCP Center</a></p>
+          <script>setTimeout(() => { window.location.href = '/ui'; }, 2000);</script>
+        </body></html>`);
+      } catch (error) {
+        logError('[mcp-center] OAuth callback error:', error);
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2 style="color:#dc3545">Authorization Failed</h2>
+          <p>${error.message || String(error)}</p>
+          <p><a href="/ui">Back to MCP Center</a></p>
+        </body></html>`);
+      }
       return;
     }
 
