@@ -44,6 +44,7 @@ export const UI_HTML = `<!DOCTYPE html>
     .status-connected { background: #d4edda; color: #155724; }
     .status-failed { background: #f8d7da; color: #721c24; }
     .status-loading { background: #fff3cd; color: #856404; }
+    .status-needs-auth { background: #cce5ff; color: #004085; }
     .error-msg { font-size: 12px; color: #721c24; margin-top: 4px; background: #f8d7da; padding: 4px 8px; border-radius: 3px; }
     .server-details { font-size: 13px; color: #666; margin-top: 4px; }
     .caps-section { margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px; }
@@ -113,8 +114,20 @@ export const UI_HTML = `<!DOCTYPE html>
             <input type="url" id="serverUrl">
           </div>
           <div class="form-group">
+            <label style="display:flex;align-items:center;gap:6px">
+              <input type="checkbox" id="serverUseOAuth" style="width:auto;margin:0" onchange="onUseOAuthChange()">
+              Use OAuth Authentication
+            </label>
+            <div style="font-size:12px;color:#888;margin-top:4px">
+              Enable for servers that require OAuth. After saving, click "Authorize" in the server list to complete the OAuth flow.
+            </div>
+          </div>
+          <div class="form-group">
             <label>HTTP Headers (JSON)</label>
             <textarea id="serverHeaders" placeholder='{"Authorization": "Bearer token"}'></textarea>
+            <div id="oauthHeadersHint" style="display:none;font-size:12px;color:#856404;margin-top:4px">
+              Note: When OAuth is enabled, any "Authorization" header here is ignored — OAuth manages the token.
+            </div>
           </div>
         </div>
         <div id="stdioFields" class="type-fields">
@@ -270,6 +283,25 @@ export const UI_HTML = `<!DOCTYPE html>
           return;
         }
 
+        if (st.status === 'needs_auth') {
+          statusEl.innerHTML = '<span class="status-badge status-needs-auth">needs auth</span>';
+          if (st.authUrl) {
+            errorEl.innerHTML = '<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<span style="font-size:13px;color:#004085">' + escHtml(st.error || 'OAuth authorization required') + '</span>' +
+              '<button class="btn btn-primary" data-auth-url="' + escHtml(st.authUrl) + '" onclick="authorizeServer(this.dataset.authUrl)">Authorize</button>' +
+              '<button class="btn btn-secondary" data-server-name="' + escHtml(s.name) + '" onclick="reauthServer(this.dataset.serverName)">Re-authorize</button>' +
+              '</div>';
+          } else {
+            errorEl.innerHTML = '<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<span style="font-size:13px;color:#004085">' + escHtml(st.error || 'OAuth authorization required') + '</span>' +
+              '<button class="btn btn-primary" data-server-name="' + escHtml(s.name) + '" onclick="reauthServer(this.dataset.serverName)">Authorize</button>' +
+              '</div>';
+          }
+          capsEl.style.display = 'none';
+          capsEl.innerHTML = '';
+          return;
+        }
+
         if (st.status === 'failed') {
           statusEl.innerHTML = '<span class="status-badge status-failed">failed</span>';
           errorEl.innerHTML = st.error
@@ -383,9 +415,13 @@ export const UI_HTML = `<!DOCTYPE html>
 
     function buildProbeConfig() {
       const type = document.getElementById('serverType').value;
-      const cfg = { name: '__probe__' };
+      const serverName = document.getElementById('serverName').value || '__probe__';
+      const cfg = { name: serverName };
       if (type === 'http') {
         cfg.url = document.getElementById('serverUrl').value;
+        if (document.getElementById('serverUseOAuth').checked) {
+          cfg.useOAuth = true;
+        }
         const h = document.getElementById('serverHeaders').value.trim();
         if (h) { try { cfg.httpHeaders = JSON.parse(h); } catch(_) {} }
       } else {
@@ -413,7 +449,26 @@ export const UI_HTML = `<!DOCTYPE html>
         });
         const data = await res.json();
         if (!res.ok) {
-          content.innerHTML = '<div class="probe-error">Error: ' + escHtml(data.error || 'Unknown error') + '</div>';
+          const errStr = String(data.error || 'Unknown error');
+          if (errStr.includes('401') || errStr.toLowerCase().includes('unauthorized')) {
+            content.innerHTML = '<div style="padding:12px;background:#fff3cd;border-radius:4px;color:#856404;font-size:13px">' +
+              '<strong>Authentication Required (401)</strong><br>' +
+              'This server requires authentication. If it uses OAuth, check "Use OAuth Authentication" above, then save and authorize. ' +
+              'Otherwise, provide a valid token in the HTTP Headers field.' +
+              '</div>';
+          } else {
+            content.innerHTML = '<div class="probe-error">Error: ' + escHtml(data.error || 'Unknown error') + '</div>';
+          }
+          return;
+        }
+        if (data.oauthRequired) {
+          content.innerHTML = '<div style="padding:12px;background:#cce5ff;border-radius:4px;color:#004085;font-size:13px">' +
+            '<strong>OAuth Authorization Required</strong><br>' +
+            escHtml(data.message) +
+            (editingIndex < 0
+              ? '<br><br><em>Tip: Save this server first, then click "Authorize" in the server list. After authorization, come back to Edit and Query Tools will work.</em>'
+              : '<br><br><em>Tip: This server has not been authorized yet. Close this dialog, click "Authorize" on the server card, then try again.</em>') +
+            '</div>';
           return;
         }
         renderProbeResults(data);
@@ -500,6 +555,7 @@ export const UI_HTML = `<!DOCTYPE html>
       editingIndex = -1;
       document.getElementById('modalTitle').textContent = 'Add Server';
       document.getElementById('serverForm').reset();
+      document.getElementById('serverUseOAuth').checked = false;
       document.getElementById('probeSection').style.display = 'none';
       document.getElementById('probeContent').innerHTML = '';
       resetSaveButton();
@@ -519,6 +575,7 @@ export const UI_HTML = `<!DOCTYPE html>
 
       if (server.url) {
         document.getElementById('serverUrl').value = server.url;
+        document.getElementById('serverUseOAuth').checked = !!server.useOAuth;
         document.getElementById('serverHeaders').value = server.httpHeaders ? JSON.stringify(server.httpHeaders, null, 2) : '';
       } else {
         document.getElementById('serverCommand').value = server.command || '';
@@ -585,6 +642,9 @@ export const UI_HTML = `<!DOCTYPE html>
 
       if (type === 'http') {
         server.url = document.getElementById('serverUrl').value;
+        if (document.getElementById('serverUseOAuth').checked) {
+          server.useOAuth = true;
+        }
         const headers = document.getElementById('serverHeaders').value.trim();
         if (headers) {
           try { server.httpHeaders = JSON.parse(headers); }
@@ -641,6 +701,34 @@ export const UI_HTML = `<!DOCTYPE html>
       const type = document.getElementById('serverType').value;
       document.getElementById('httpFields').classList.toggle('active', type === 'http');
       document.getElementById('stdioFields').classList.toggle('active', type === 'stdio');
+      onUseOAuthChange();
+    }
+
+    function onUseOAuthChange() {
+      const checked = document.getElementById('serverUseOAuth')?.checked;
+      const hint = document.getElementById('oauthHeadersHint');
+      if (hint) hint.style.display = checked ? 'block' : 'none';
+    }
+
+    function authorizeServer(authUrl) {
+      window.open(authUrl, '_blank');
+    }
+
+    async function reauthServer(serverName) {
+      try {
+        const res = await fetch('/api/servers/' + encodeURIComponent(serverName) + '/reauth', { method: 'POST' });
+        const data = await res.json();
+        if (data.authUrl) {
+          window.open(data.authUrl, '_blank');
+        } else if (data.status === 'connected') {
+          alert('Server "' + serverName + '" is now connected — no authorization needed.');
+        } else {
+          alert('Could not generate authorization URL. Check server logs for details.');
+        }
+        await loadServers();
+      } catch(e) {
+        alert('Error: ' + e.message);
+      }
     }
 
     loadServers();

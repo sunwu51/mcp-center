@@ -4,12 +4,14 @@ import {
   StreamableHTTPClientTransport,
   StreamableHTTPError,
 } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { log as logMessage, warn as logWarn, error as logError } from './log.js';
 import {
   callWsBridgeTool,
   getWsBridgeTools,
   setWsBridgeCallbacks
 } from './wsBridge.js';
+import { getOrCreateProvider, getPendingAuth } from './oauth.js';
 
 /** @type {Map<string, {name: string, client: Client, tools: Array, resources: Array, resourceTemplates: Array, prompts: Array, config: object}>} */
 const loadedServers = new Map();
@@ -35,9 +37,23 @@ function serverConfigChanged(a, b) {
 
 function createHttpTransport(config) {
   const opts = {};
-  if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
+
+  if (config.useOAuth) {
+    const provider = getOrCreateProvider(config.name, config.url);
+    opts.authProvider = provider;
+
+    if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
+      const filteredHeaders = { ...config.httpHeaders };
+      delete filteredHeaders['Authorization'];
+      delete filteredHeaders['authorization'];
+      if (Object.keys(filteredHeaders).length > 0) {
+        opts.requestInit = { headers: filteredHeaders };
+      }
+    }
+  } else if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
     opts.requestInit = { headers: config.httpHeaders };
   }
+
   return new StreamableHTTPClientTransport(new URL(config.url), opts);
 }
 
@@ -80,6 +96,17 @@ async function runWithHttpSessionRefresh(server, operation) {
   try {
     return await operation(server);
   } catch (error) {
+    if (error instanceof UnauthorizedError && server.config?.useOAuth) {
+      const { getPendingAuth } = await import('./oauth.js');
+      const pending = getPendingAuth(server.config.name);
+      serverStatus.set(server.config.name, {
+        status: 'needs_auth',
+        error: 'OAuth authorization required (token expired)',
+        authUrl: pending?.url || null,
+      });
+      throw error;
+    }
+
     if (server.type === 'wsBridge' || !server.config?.url || !hadSessionId || !isSessionNotFoundError(error)) {
       throw error;
     }
@@ -289,6 +316,9 @@ export async function loadAllServers(servers) {
     try {
       await loadServer(serverConfig);
     } catch (error) {
+      if (serverConfig.useOAuth && serverConfig.url) {
+        return;
+      }
       logError(`[mcp-center] Failed to load server "${serverConfig.name}":`, error);
     }
   });
@@ -309,7 +339,24 @@ async function loadHttpServer(config) {
   const transport = createHttpTransport(config);
   const client = createMcpClient(config.name);
 
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (error) {
+    if (config.useOAuth) {
+      const pending = getPendingAuth(config.name);
+      const authUrl = pending?.url || null;
+      const isUnauthorized = error instanceof UnauthorizedError;
+      serverStatus.set(config.name, {
+        status: 'needs_auth',
+        error: isUnauthorized ? 'OAuth authorization required' : (error.message || String(error)),
+        authUrl,
+      });
+      logWarn(`[mcp-center] Server "${config.name}" needs OAuth authorization${authUrl ? '' : ' (no auth URL yet — click Authorize to retry)'}`);
+      throw error;
+    }
+    throw error;
+  }
+
   const { tools, resources, resourceTemplates, prompts } = await loadServerCapabilities(client, config);
 
   return { name: config.name, client, transport, tools, resources, resourceTemplates, prompts };
@@ -398,6 +445,15 @@ export async function loadServer(config) {
     }
   } catch (error) {
     const errMsg = error.message || String(error);
+
+    if (config.useOAuth && config.url) {
+      if (!serverStatus.get(config.name) || serverStatus.get(config.name).status !== 'needs_auth') {
+        serverStatus.set(config.name, { status: 'needs_auth', error: errMsg, authUrl: null });
+      }
+      logWarn(`[mcp-center] Server "${config.name}" needs OAuth authorization: ${errMsg}`);
+      return null;
+    }
+
     logError(`[mcp-center] Failed to load server "${config.name}": ${errMsg}`);
     serverStatus.set(config.name, { status: 'failed', error: errMsg });
     throw error;
@@ -622,7 +678,31 @@ export async function probeServer(config) {
   try {
     if (config.url) {
       const opts = {};
-      if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
+      if (config.useOAuth) {
+        const { getOrCreateProvider, hasStoredTokens } = await import('./oauth.js');
+
+        if (hasStoredTokens(config.name)) {
+          opts.authProvider = getOrCreateProvider(config.name, config.url);
+        } else {
+          return {
+            tools: [],
+            resources: [],
+            resourceTemplates: [],
+            prompts: [],
+            oauthRequired: true,
+            message: 'OAuth authorization required. Save this server first, then click "Authorize" in the server list to complete the OAuth flow.',
+          };
+        }
+
+        if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
+          const filteredHeaders = { ...config.httpHeaders };
+          delete filteredHeaders['Authorization'];
+          delete filteredHeaders['authorization'];
+          if (Object.keys(filteredHeaders).length > 0) {
+            opts.requestInit = { headers: filteredHeaders };
+          }
+        }
+      } else if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
         opts.requestInit = { headers: config.httpHeaders };
       }
       const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');

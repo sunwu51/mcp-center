@@ -24,6 +24,7 @@ describe('inbound auth helpers', () => {
     expect(shouldProtectHttpPath('/mcp', config)).toBe(true);
     expect(shouldProtectHttpPath('/mcp/session-id', config)).toBe(true);
     expect(shouldProtectHttpPath('/api/servers', config)).toBe(true);
+    expect(shouldProtectHttpPath('/fs/upload', config)).toBe(true);
     expect(shouldProtectHttpPath('/ui', config)).toBe(false);
     expect(shouldProtectHttpPath('/ws/agent', config)).toBe(false);
   });

@@ -38,6 +38,7 @@ export function shouldProtectHttpPath(pathname, config = getAuthConfig()) {
   if (!config.enabled) return false;
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return true;
   if (pathname === '/api' || pathname.startsWith('/api/')) return true;
+  if (pathname === '/fs/upload') return true;
   return false;
 }
 

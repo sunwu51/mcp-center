@@ -21,6 +21,8 @@ function validateServerConfig(server) {
   if (server.args !== undefined && !Array.isArray(server.args)) return false;
   if (server.env !== undefined && typeof server.env !== 'object') return false;
   if (server.enabledTools !== undefined && !Array.isArray(server.enabledTools)) return false;
+  if (server.useOAuth !== undefined && typeof server.useOAuth !== 'boolean') return false;
+  if (server.httpHeaders !== undefined && typeof server.httpHeaders !== 'object') return false;
   return true;
 }
 
