@@ -38,7 +38,8 @@ import {
   getAuthStatus,
   clearStoredCredentials,
 } from './oauth.js';
-import { readJsonBody, saveBase64Upload, UploadError } from './fileUpload.js';
+import { saveMultipartUpload, UploadError } from './fileUpload.js';
+import { handleCorsPreflight } from './cors.js';
 
 let reloadInFlight = null;
 let reloadQueued = false;
@@ -221,6 +222,8 @@ async function runHttp(port) {
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
+    if (handleCorsPreflight(req, res)) return;
+
     if (shouldProtectHttpPath(url.pathname, authConfig) && !isAuthorizedRequest(req, {
       config: authConfig,
     })) {
@@ -237,8 +240,7 @@ async function runHttp(port) {
 
     if (url.pathname === '/fs/upload' && req.method === 'POST') {
       try {
-        const body = await readJsonBody(req);
-        const result = await saveBase64Upload(body);
+        const result = await saveMultipartUpload(req);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (error) {

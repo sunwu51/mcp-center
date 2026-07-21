@@ -1,6 +1,6 @@
 {
   "name": "@sunwu51/mcp-center",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "MCP Server management tool that aggregates multiple MCP servers",
   "main": "src/index.js",
   "bin": {
@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "busboy": "^1.6.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {

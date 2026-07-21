@@ -94,16 +94,13 @@ Your MCP client must support Streamable HTTP transport.
 
 ## Temporary File Upload
 
-WebSocket clients can store base64-encoded image results as temporary files with `POST /fs/upload`:
+WebSocket clients can store image results as temporary files with `POST /fs/upload`. Send a standard `multipart/form-data` request with exactly one file field named `file`:
 
-```json
-{
-  "base64": "iVBORw0KGgo...",
-  "filename": "result.png"
-}
+```bash
+curl -X POST http://localhost:3000/fs/upload -F "file=@result.png"
 ```
 
-The endpoint also accepts image-result shaped payloads such as `{ "data": "...", "mimeType": "image/png" }` and base64 data URLs. It returns the absolute temporary path:
+The endpoint streams the uploaded file directly to disk and returns its absolute temporary path:
 
 ```json
 {
@@ -115,13 +112,20 @@ This is especially useful for a WebSocket MCP tool that returns an image. Keep t
 
 ```javascript
 async function buildImageToolResult(base64, mimeType = 'image/png') {
+  const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1];
+  const form = new FormData();
+  form.append(
+    'file',
+    new Blob([Buffer.from(base64, 'base64')], { type: mimeType }),
+    `result.${extension}`
+  );
+
   const uploadResponse = await fetch('http://localhost:3000/fs/upload', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
       // When enabled: Authorization: 'Bearer ' + process.env.MCP_CENTER_AUTH_TOKEN
     },
-    body: JSON.stringify({ data: base64, mimeType })
+    body: form
   });
 
   if (!uploadResponse.ok) {
@@ -142,6 +146,8 @@ const result = await buildImageToolResult(imageBase64, 'image/png');
 ws.send(JSON.stringify({ jsonrpc: '2.0', id: requestId, result }));
 ```
 
+Do not set the `Content-Type` header manually when using `FormData`; the runtime adds the required multipart boundary. In a browser, replace `Buffer.from(base64, 'base64')` with a base64-to-`Uint8Array` conversion before creating the `Blob`.
+
 The resulting MCP tool response contains both forms:
 
 ```json
@@ -159,7 +165,11 @@ The resulting MCP tool response contains both forms:
 
 `filePath` is an absolute path on the machine running MCP Center. It can be passed to later local MCP tool calls without decoding and writing the image again.
 
-Files are limited to 20 MiB after decoding and are written under the operating system temporary directory with a UUID filename. The extension is preserved from `filename`, or inferred from a supported image MIME type. When `MCP_CENTER_AUTH_TOKEN` is configured, `/fs/upload` requires the same Bearer token as `/mcp` and `/api`.
+Files are limited to 500 MiB and are streamed under the operating system temporary directory with a UUID filename. The extension is preserved from the multipart filename, or inferred from a supported image MIME type. Incomplete and oversized files are removed. When `MCP_CENTER_AUTH_TOKEN` is configured, `/fs/upload` requires the same Bearer token as `/mcp` and `/api`.
+
+## Cross-Origin Requests
+
+All HTTP endpoints support browser cross-origin requests, including `/mcp`, `/api/*`, `/fs/upload`, `/oauth/callback`, and the Web UI. MCP Center responds to `OPTIONS` preflight requests and allows the headers used by authenticated and Streamable HTTP clients, including `Authorization`, `Content-Type`, `MCP-Session-ID`, `MCP-Protocol-Version`, and `Last-Event-ID`. It also exposes `MCP-Session-ID`, `Location`, and `WWW-Authenticate` response headers to browser clients.
 
 ## Inbound Authentication
 
