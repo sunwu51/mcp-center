@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { createServer as createHttpServer } from 'http';
-import { randomUUID } from 'crypto';
 import { UI_HTML } from './ui.js';
 import { warn as logWarn, error as logError } from './log.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -216,7 +215,6 @@ function triggerReloadAllServers() {
  * @returns {Promise<void>}
  */
 async function runHttp(port) {
-  const sessions = new Map();
   const authConfig = getAuthConfig();
 
   const httpServer = createHttpServer(async (req, res) => {
@@ -555,28 +553,28 @@ async function runHttp(port) {
       return;
     }
 
-    // MCP endpoint
-    if (url.pathname === '/mcp' && req.method === 'POST') {
-      const sessionId = randomUUID();
-      const mcpServer = createMcpServer();
-      const transport = new StreamableHTTPServerTransport('/mcp', sessionId);
-      sessions.set(sessionId, { server: mcpServer, transport });
-
-      await mcpServer.connect(transport);
-      await transport.handleRequest(req, res);
+    // Streamable HTTP is POST-only. Some clients probe the endpoint with GET
+    // and require an explicit method response before attempting initialization.
+    if (url.pathname === '/mcp' && req.method === 'GET') {
+      res.writeHead(405, {
+        'Allow': 'POST',
+        'Content-Type': 'text/plain',
+      });
+      res.end('Method Not Allowed');
       return;
     }
 
-    if (url.pathname.startsWith('/mcp/') && req.method === 'POST') {
-      const sessionId = url.pathname.split('/')[2];
-      if (sessions.has(sessionId)) {
-        const session = sessions.get(sessionId);
-        await session.transport.handleRequest(req, res);
-        sessions.delete(sessionId);
-      } else {
-        res.writeHead(404);
-        res.end('Session not found');
-      }
+    // MCP endpoint
+    if (url.pathname === '/mcp' && req.method === 'POST') {
+      const mcpServer = createMcpServer();
+      // MCP Center is intentionally stateless: each request gets a fresh transport
+      // and clients do not need to retain an MCP-Session-ID.
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res);
       return;
     }
 

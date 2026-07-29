@@ -81,11 +81,26 @@ export const UI_HTML = `<!DOCTYPE html>
     .probe-item-desc { font-size: 12px; color: #888; }
     .enabled-tools-row { display: flex; align-items: center; gap: 8px; }
     .enabled-tools-row input { flex: 1; }
+    .auth-bar { display: none; align-items: flex-end; gap: 8px; margin-bottom: 20px; padding: 12px; background: #fff3cd; border: 1px solid #ffe69c; border-radius: 4px; }
+    .auth-bar.active { display: flex; }
+    .auth-field { flex: 1; }
+    .auth-field label { margin-bottom: 4px; font-size: 13px; color: #664d03; }
+    .auth-error { display: none; margin-top: 4px; font-size: 12px; color: #842029; }
+    @media (max-width: 600px) { .auth-bar { align-items: stretch; flex-direction: column; } }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>MCP Center</h1>
+    <form id="authBar" class="auth-bar" onsubmit="submitAuthToken(event)">
+      <div class="auth-field">
+        <label for="authToken">Authentication token</label>
+        <input type="password" id="authToken" autocomplete="current-password" required>
+        <div id="authError" class="auth-error">Invalid token. Try again.</div>
+      </div>
+      <button type="submit" class="btn btn-primary">Connect</button>
+      <button type="button" class="btn btn-secondary" onclick="clearAuthToken()">Clear</button>
+    </form>
     <button class="btn btn-primary" onclick="openAddModal()">+ Add Server</button>
     <div class="server-list" id="serverList"></div>
   </div>
@@ -166,16 +181,62 @@ export const UI_HTML = `<!DOCTYPE html>
     let editingIndex = -1;
     let listReloadTimer = null;
     let lastRenderedServersKey = '';
+    const AUTH_TOKEN_KEY = 'mcp-center-auth-token';
+
+    function getAuthToken() {
+      try { return sessionStorage.getItem(AUTH_TOKEN_KEY) || ''; }
+      catch (_) { return ''; }
+    }
+
+    function showAuthPrompt(invalid = false) {
+      document.getElementById('authBar').classList.add('active');
+      document.getElementById('authError').style.display = invalid ? 'block' : 'none';
+    }
+
+    function hideAuthPrompt() {
+      document.getElementById('authBar').classList.remove('active');
+      document.getElementById('authError').style.display = 'none';
+      document.getElementById('authToken').value = '';
+    }
+
+    async function apiFetch(url, options = {}) {
+      const headers = new Headers(options.headers || {});
+      const token = getAuthToken();
+      if (token) headers.set('Authorization', 'Bearer ' + token);
+
+      const response = await fetch(url, { ...options, headers });
+      if (response.status === 401) showAuthPrompt(!!token);
+      return response;
+    }
+
+    async function submitAuthToken(event) {
+      event.preventDefault();
+      const token = document.getElementById('authToken').value.trim();
+      if (!token) return;
+      try { sessionStorage.setItem(AUTH_TOKEN_KEY, token); } catch (_) {}
+      await loadServers();
+    }
+
+    async function clearAuthToken() {
+      try { sessionStorage.removeItem(AUTH_TOKEN_KEY); } catch (_) {}
+      document.getElementById('authToken').value = '';
+      showAuthPrompt(false);
+      document.getElementById('serverList').innerHTML = '';
+    }
 
     async function loadServers() {
       const [serversRes, statusRes, wsBridgeRes] = await Promise.all([
-        fetch('/api/servers'),
-        fetch('/api/servers/status'),
-        fetch('/api/wsbridge/servers').catch(() => ({ json: () => [] }))
+        apiFetch('/api/servers'),
+        apiFetch('/api/servers/status'),
+        apiFetch('/api/wsbridge/servers').catch(() => ({ ok: false, json: () => [] }))
       ]);
+      if (serversRes.status === 401 || statusRes.status === 401 || wsBridgeRes.status === 401) return;
+      if (!serversRes.ok || !statusRes.ok) throw new Error('Failed to load server data');
+
+      hideAuthPrompt();
       const servers = await serversRes.json();
       const statusMap = await statusRes.json();
-      const wsBridgeServers = await wsBridgeRes.json();
+      const wsBridgeServers = wsBridgeRes.ok ? await wsBridgeRes.json() : [];
       const list = document.getElementById('serverList');
       const serversKey = JSON.stringify(servers) + '|' + JSON.stringify(wsBridgeServers);
 
@@ -361,7 +422,7 @@ export const UI_HTML = `<!DOCTYPE html>
     async function toggleServer(index, checkbox) {
       checkbox.disabled = true;
       try {
-        const res = await fetch('/api/servers/' + index + '/toggle', { method: 'PATCH' });
+        const res = await apiFetch('/api/servers/' + index + '/toggle', { method: 'PATCH' });
         if (!res.ok) {
           const data = await res.json();
           alert('Error: ' + (data.error || 'Unknown error'));
@@ -383,7 +444,7 @@ export const UI_HTML = `<!DOCTYPE html>
       const el = document.getElementById(elId);
       if (!el) return;
       try {
-        const res = await fetch('/api/servers/' + encodeURIComponent(serverName) + '/capabilities');
+        const res = await apiFetch('/api/servers/' + encodeURIComponent(serverName) + '/capabilities');
         if (!res.ok) { el.innerHTML = ''; return; }
         const caps = await res.json();
         let html = '';
@@ -442,7 +503,7 @@ export const UI_HTML = `<!DOCTYPE html>
       const cfg = buildProbeConfig();
       content.innerHTML = '<div class="probe-loading">Connecting to server...</div>';
       try {
-        const res = await fetch('/api/probe', {
+        const res = await apiFetch('/api/probe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cfg)
@@ -564,7 +625,7 @@ export const UI_HTML = `<!DOCTYPE html>
     }
 
     async function editServer(index) {
-      const res = await fetch('/api/servers');
+      const res = await apiFetch('/api/servers');
       const servers = await res.json();
       const server = servers[index];
       editingIndex = index;
@@ -596,7 +657,7 @@ export const UI_HTML = `<!DOCTYPE html>
       const btn = document.getElementById('delete-btn-' + index);
       setButtonLoading(btn, true, 'Deleting...');
       try {
-        const res = await fetch('/api/servers/' + index, { method: 'DELETE' });
+        const res = await apiFetch('/api/servers/' + index, { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json();
           alert('Error: ' + (data.error || 'Unknown error'));
@@ -672,7 +733,7 @@ export const UI_HTML = `<!DOCTYPE html>
       saveBtn.disabled = true;
 
       try {
-        const res = await fetch(url, {
+        const res = await apiFetch(url, {
           method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(server)
@@ -716,7 +777,7 @@ export const UI_HTML = `<!DOCTYPE html>
 
     async function reauthServer(serverName) {
       try {
-        const res = await fetch('/api/servers/' + encodeURIComponent(serverName) + '/reauth', { method: 'POST' });
+        const res = await apiFetch('/api/servers/' + encodeURIComponent(serverName) + '/reauth', { method: 'POST' });
         const data = await res.json();
         if (data.authUrl) {
           window.open(data.authUrl, '_blank');
