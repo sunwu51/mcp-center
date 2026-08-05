@@ -4,7 +4,7 @@ import {
   StreamableHTTPClientTransport,
   StreamableHTTPError,
 } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
+import { auth, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { log as logMessage, warn as logWarn, error as logError } from './log.js';
 import {
   callWsBridgeTool,
@@ -97,6 +97,21 @@ async function runWithHttpSessionRefresh(server, operation) {
     return await operation(server);
   } catch (error) {
     if (error instanceof UnauthorizedError && server.config?.useOAuth) {
+      const provider = getOrCreateProvider(server.config.name, server.config.url);
+
+      try {
+        // The SDK refreshes through auth(provider) when a stored refresh token
+        // is available. Reconnect so the refreshed bearer token is used by the
+        // new MCP session, then retry the request once.
+        const authResult = await auth(provider, { serverUrl: server.config.url });
+        if (authResult === 'AUTHORIZED') {
+          await reconnectHttpServer(server);
+          return await operation(server);
+        }
+      } catch (refreshError) {
+        logWarn(`[mcp-center] OAuth token refresh failed for "${server.name}":`, refreshError);
+      }
+
       const { getPendingAuth } = await import('./oauth.js');
       const pending = getPendingAuth(server.config.name);
       serverStatus.set(server.config.name, {

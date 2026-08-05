@@ -17,6 +17,11 @@ const pendingAuths = new Map();
  */
 const providers = new Map();
 
+/** @type {Map<string, NodeJS.Timeout>} */
+const refreshTimers = new Map();
+
+const TOKEN_REFRESH_LEAD_TIME_MS = 10 * 60 * 1000;
+
 /**
  * Get the path to the OAuth token store file.
  * @returns {string}
@@ -50,6 +55,28 @@ function saveTokenStore(store) {
   writeFileSync(path, JSON.stringify(store, null, 2), 'utf-8');
 }
 
+function scheduleTokenRefresh(provider, tokens) {
+  const existingTimer = refreshTimers.get(provider.serverName);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  if (!tokens?.refresh_token || !tokens.expires_at) return;
+
+  const delay = Math.max(1000, tokens.expires_at - Date.now() - TOKEN_REFRESH_LEAD_TIME_MS);
+  const timer = setTimeout(async () => {
+    refreshTimers.delete(provider.serverName);
+    try {
+      const result = await auth(provider, { serverUrl: provider.serverUrl });
+      if (result === 'AUTHORIZED') {
+        logMessage(`[mcp-center] OAuth token refreshed for "${provider.serverName}"`);
+      }
+    } catch (error) {
+      logWarn(`[mcp-center] OAuth token refresh failed for "${provider.serverName}":`, error);
+    }
+  }, delay);
+  timer.unref?.();
+  refreshTimers.set(provider.serverName, timer);
+}
+
 /**
  * Get the callback port for OAuth redirects.
  * Reads from PORT env or defaults to 3000.
@@ -76,6 +103,12 @@ export class FileOAuthClientProvider {
   constructor(serverName, serverUrl) {
     this.serverName = serverName;
     this.serverUrl = serverUrl;
+    const storedTokens = loadTokenStore()[serverName]?.tokens;
+    if (storedTokens?.expires_at === undefined && storedTokens?.expires_in !== undefined) {
+      this.saveTokens(storedTokens);
+    } else {
+      scheduleTokenRefresh(this, storedTokens);
+    }
   }
 
   get redirectUrl() {
@@ -116,8 +149,16 @@ export class FileOAuthClientProvider {
   saveTokens(tokens) {
     const store = loadTokenStore();
     if (!store[this.serverName]) store[this.serverName] = {};
-    store[this.serverName].tokens = tokens;
+    const normalizedTokens = { ...tokens };
+    if (normalizedTokens.expires_in !== undefined) {
+      const expiresIn = Number(normalizedTokens.expires_in);
+      if (Number.isFinite(expiresIn) && expiresIn >= 0) {
+        normalizedTokens.expires_at = Date.now() + expiresIn * 1000;
+      }
+    }
+    store[this.serverName].tokens = normalizedTokens;
     saveTokenStore(store);
+    scheduleTokenRefresh(this, normalizedTokens);
   }
 
   saveCodeVerifier(codeVerifier) {
@@ -281,6 +322,9 @@ export function clearStoredCredentials(serverName) {
   saveTokenStore(store);
   clearPendingAuth(serverName);
   providers.delete(serverName);
+  const refreshTimer = refreshTimers.get(serverName);
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimers.delete(serverName);
   logMessage(`[mcp-center] Cleared OAuth credentials for "${serverName}"`);
 }
 
