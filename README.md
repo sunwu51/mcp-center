@@ -92,6 +92,26 @@ http://localhost:3000/mcp
 
 Your MCP client must support Streamable HTTP transport.
 
+## HTTP Server Proxy
+
+For an HTTP child MCP server, set the optional **Proxy** field in the Web UI, or add `proxy` to its configuration:
+
+```json
+{
+  "servers": [
+    {
+      "name": "remote",
+      "url": "https://mcp.example.com/mcp",
+      "proxy": "http://user:pass@127.0.0.1:7890"
+    }
+  ]
+}
+```
+
+HTTP and HTTPS proxy URLs are supported, with or without username/password authentication. Percent-encode special characters in credentials (for example, `p%40ss` for `p@ss`). Omit `proxy` or leave the field empty to connect directly.
+
+The proxy applies only to that server's outgoing MCP requests, streaming connections, capability probes, and backend OAuth discovery/token requests. It does not change global proxy settings or the browser's OAuth authorization page. Proxy credentials are stored in the config file, like HTTP headers, but hidden from the server list summary. The proxy must be reachable from the machine running MCP Center.
+
 ## Temporary File Upload
 
 WebSocket clients can store image results as temporary files with `POST /fs/upload`. Send a standard `multipart/form-data` request with exactly one file field named `file`:

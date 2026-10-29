@@ -12,6 +12,7 @@ import {
   setWsBridgeCallbacks
 } from './wsBridge.js';
 import { getOrCreateProvider, getPendingAuth } from './oauth.js';
+import { createProxyFetch } from './proxy.js';
 
 /** @type {Map<string, {name: string, client: Client, tools: Array, resources: Array, resourceTemplates: Array, prompts: Array, config: object}>} */
 const loadedServers = new Map();
@@ -39,7 +40,7 @@ function createHttpTransport(config) {
   const opts = {};
 
   if (config.useOAuth) {
-    const provider = getOrCreateProvider(config.name, config.url);
+    const provider = getOrCreateProvider(config.name, config.url, config.proxy);
     opts.authProvider = provider;
 
     if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
@@ -54,7 +55,15 @@ function createHttpTransport(config) {
     opts.requestInit = { headers: config.httpHeaders };
   }
 
-  return new StreamableHTTPClientTransport(new URL(config.url), opts);
+  opts.fetch = createProxyFetch(config.proxy);
+  const transport = new StreamableHTTPClientTransport(new URL(config.url), opts);
+  if (opts.fetch) {
+    const close = transport.close.bind(transport);
+    transport.close = async () => {
+      try { await close(); } finally { await opts.fetch.close(); }
+    };
+  }
+  return transport;
 }
 
 function createMcpClient(name) {
@@ -97,13 +106,13 @@ async function runWithHttpSessionRefresh(server, operation) {
     return await operation(server);
   } catch (error) {
     if (error instanceof UnauthorizedError && server.config?.useOAuth) {
-      const provider = getOrCreateProvider(server.config.name, server.config.url);
+      const provider = getOrCreateProvider(server.config.name, server.config.url, server.config.proxy);
 
       try {
         // The SDK refreshes through auth(provider) when a stored refresh token
         // is available. Reconnect so the refreshed bearer token is used by the
         // new MCP session, then retry the request once.
-        const authResult = await auth(provider, { serverUrl: server.config.url });
+        const authResult = await auth(provider, { serverUrl: server.config.url, fetchFn: provider.fetch });
         if (authResult === 'AUTHORIZED') {
           await reconnectHttpServer(server);
           return await operation(server);
@@ -357,6 +366,7 @@ async function loadHttpServer(config) {
   try {
     await client.connect(transport);
   } catch (error) {
+    await transport.close();
     if (config.useOAuth) {
       const pending = getPendingAuth(config.name);
       const authUrl = pending?.url || null;
@@ -692,13 +702,9 @@ export async function probeServer(config) {
   let client;
   try {
     if (config.url) {
-      const opts = {};
       if (config.useOAuth) {
-        const { getOrCreateProvider, hasStoredTokens } = await import('./oauth.js');
-
-        if (hasStoredTokens(config.name)) {
-          opts.authProvider = getOrCreateProvider(config.name, config.url);
-        } else {
+        const { hasStoredTokens } = await import('./oauth.js');
+        if (!hasStoredTokens(config.name)) {
           return {
             tools: [],
             resources: [],
@@ -708,20 +714,8 @@ export async function probeServer(config) {
             message: 'OAuth authorization required. Save this server first, then click "Authorize" in the server list to complete the OAuth flow.',
           };
         }
-
-        if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
-          const filteredHeaders = { ...config.httpHeaders };
-          delete filteredHeaders['Authorization'];
-          delete filteredHeaders['authorization'];
-          if (Object.keys(filteredHeaders).length > 0) {
-            opts.requestInit = { headers: filteredHeaders };
-          }
-        }
-      } else if (config.httpHeaders && Object.keys(config.httpHeaders).length > 0) {
-        opts.requestInit = { headers: config.httpHeaders };
       }
-      const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-      const transport = new StreamableHTTPClientTransport(new URL(config.url), opts);
+      const transport = createHttpTransport(config);
       client = new Client({ name: 'mcp-center-probe', version: '1.0.0' }, {});
       await client.connect(transport);
     } else {

@@ -3,6 +3,7 @@ import { resolve, dirname } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { auth } from '@modelcontextprotocol/sdk/client/auth.js';
+import { createProxyFetch } from './proxy.js';
 import { log as logMessage, warn as logWarn, error as logError } from './log.js';
 
 /**
@@ -65,7 +66,7 @@ function scheduleTokenRefresh(provider, tokens) {
   const timer = setTimeout(async () => {
     refreshTimers.delete(provider.serverName);
     try {
-      const result = await auth(provider, { serverUrl: provider.serverUrl });
+      const result = await auth(provider, { serverUrl: provider.serverUrl, fetchFn: provider.fetch });
       if (result === 'AUTHORIZED') {
         logMessage(`[mcp-center] OAuth token refreshed for "${provider.serverName}"`);
       }
@@ -99,10 +100,13 @@ export class FileOAuthClientProvider {
   /**
    * @param {string} serverName
    * @param {string} serverUrl
+   * @param {string} [proxy]
    */
-  constructor(serverName, serverUrl) {
+  constructor(serverName, serverUrl, proxy) {
     this.serverName = serverName;
     this.serverUrl = serverUrl;
+    this.proxy = proxy;
+    this.fetch = createProxyFetch(proxy);
     const storedTokens = loadTokenStore()[serverName]?.tokens;
     if (storedTokens?.expires_at === undefined && storedTokens?.expires_in !== undefined) {
       this.saveTokens(storedTokens);
@@ -232,11 +236,21 @@ export class FileOAuthClientProvider {
  * Get or create a FileOAuthClientProvider for a server.
  * @param {string} serverName
  * @param {string} serverUrl
+ * @param {string} [proxy]
  * @returns {FileOAuthClientProvider}
  */
-export function getOrCreateProvider(serverName, serverUrl) {
+export function getOrCreateProvider(serverName, serverUrl, proxy) {
   if (!providers.has(serverName)) {
-    providers.set(serverName, new FileOAuthClientProvider(serverName, serverUrl));
+    providers.set(serverName, new FileOAuthClientProvider(serverName, serverUrl, proxy));
+  } else {
+    const provider = providers.get(serverName);
+    if (provider.proxy !== proxy) {
+      const fetch = createProxyFetch(proxy);
+      provider.fetch?.close().catch(error => logWarn('[mcp-center] Error closing OAuth proxy:', error));
+      provider.proxy = proxy;
+      provider.fetch = fetch;
+    }
+    provider.serverUrl = serverUrl;
   }
   return providers.get(serverName);
 }
@@ -284,13 +298,14 @@ export async function handleOAuthCallback(code, state) {
   const { serverName, serverUrl } = pending;
   pendingAuths.delete(state);
 
-  const provider = getOrCreateProvider(serverName, serverUrl);
+  const provider = providers.get(serverName) || getOrCreateProvider(serverName, serverUrl);
 
   logMessage(`[mcp-center] Exchanging OAuth authorization code for tokens (${serverName})...`);
 
   const result = await auth(provider, {
     serverUrl,
     authorizationCode: code,
+    fetchFn: provider.fetch,
   });
 
   if (result !== 'AUTHORIZED') {
@@ -321,6 +336,7 @@ export function clearStoredCredentials(serverName) {
   delete store[serverName];
   saveTokenStore(store);
   clearPendingAuth(serverName);
+  providers.get(serverName)?.fetch?.close().catch(error => logWarn('[mcp-center] Error closing OAuth proxy:', error));
   providers.delete(serverName);
   const refreshTimer = refreshTimers.get(serverName);
   if (refreshTimer) clearTimeout(refreshTimer);

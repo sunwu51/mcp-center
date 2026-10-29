@@ -2,6 +2,7 @@ import { readFileSync, existsSync, watchFile, unwatchFile, writeFileSync, mkdirS
 import { resolve, dirname } from 'path';
 import { homedir } from 'os';
 import { error as logError } from './log.js';
+import { validateProxy } from './proxy.js';
 
 let currentConfig = null;
 let configPath = '';
@@ -23,6 +24,7 @@ function validateServerConfig(server) {
   if (server.enabledTools !== undefined && !Array.isArray(server.enabledTools)) return false;
   if (server.useOAuth !== undefined && typeof server.useOAuth !== 'boolean') return false;
   if (server.httpHeaders !== undefined && typeof server.httpHeaders !== 'object') return false;
+  if (!validateProxy(server.proxy)) return false;
   return true;
 }
 

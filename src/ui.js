@@ -138,6 +138,13 @@ export const UI_HTML = `<!DOCTYPE html>
             </div>
           </div>
           <div class="form-group">
+            <label>Proxy</label>
+            <input type="text" id="serverProxy" placeholder="http://user:pass@127.0.0.1:7890" autocomplete="off" spellcheck="false">
+            <div style="font-size:12px;color:#888;margin-top:4px">
+              Optional HTTP/HTTPS proxy for this server. Leave empty to connect directly.
+            </div>
+          </div>
+          <div class="form-group">
             <label>HTTP Headers (JSON)</label>
             <textarea id="serverHeaders" placeholder='{"Authorization": "Bearer token"}'></textarea>
             <div id="oauthHeadersHint" style="display:none;font-size:12px;color:#856404;margin-top:4px">
@@ -251,7 +258,7 @@ export const UI_HTML = `<!DOCTYPE html>
         const type = s.url ? 'http' : 'stdio';
         const maskObj = obj => JSON.stringify(Object.fromEntries(Object.keys(obj).map(k => [k, '******'])));
         const details = type === 'http'
-          ? 'URL: ' + s.url + (s.httpHeaders && Object.keys(s.httpHeaders).length ? ' | Headers: ' + maskObj(s.httpHeaders) : '')
+          ? 'URL: ' + s.url + (s.proxy ? ' | Proxy: ' + describeProxy(s.proxy) : '') + (s.httpHeaders && Object.keys(s.httpHeaders).length ? ' | Headers: ' + maskObj(s.httpHeaders) : '')
           : 'Command: ' + s.command + ' ' + (s.args || []).join(' ') + (s.env && Object.keys(s.env).length ? ' | Env: ' + maskObj(s.env) : '');
         const enabled = s.enabled !== false;
         const capsId = 'caps-' + i;
@@ -474,6 +481,30 @@ export const UI_HTML = `<!DOCTYPE html>
       }
     }
 
+    // Returns { value } (empty string means direct connection) or { error }.
+    function parseProxyInput(raw) {
+      const value = String(raw || '').trim();
+      if (!value) return { value: '' };
+      let u;
+      try { u = new URL(value); }
+      catch (_) { return { error: 'Invalid proxy URL. Expected format: http://user:pass@127.0.0.1:7890' }; }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return { error: 'Proxy URL must start with http:// or https://' };
+      }
+      if (!u.hostname) return { error: 'Proxy URL must include a host' };
+      return { value };
+    }
+
+    // Safe label for list summaries: never include credentials, path or query.
+    function describeProxy(proxy) {
+      try {
+        const u = new URL(proxy);
+        return u.protocol + '//' + u.host;
+      } catch (_) {
+        return '******';
+      }
+    }
+
     function buildProbeConfig() {
       const type = document.getElementById('serverType').value;
       const serverName = document.getElementById('serverName').value || '__probe__';
@@ -483,6 +514,9 @@ export const UI_HTML = `<!DOCTYPE html>
         if (document.getElementById('serverUseOAuth').checked) {
           cfg.useOAuth = true;
         }
+        const proxy = parseProxyInput(document.getElementById('serverProxy').value);
+        if (proxy.error) throw new Error(proxy.error);
+        if (proxy.value) cfg.proxy = proxy.value;
         const h = document.getElementById('serverHeaders').value.trim();
         if (h) { try { cfg.httpHeaders = JSON.parse(h); } catch(_) {} }
       } else {
@@ -500,7 +534,12 @@ export const UI_HTML = `<!DOCTYPE html>
       const content = document.getElementById('probeContent');
       sec.style.display = 'block';
 
-      const cfg = buildProbeConfig();
+      let cfg;
+      try { cfg = buildProbeConfig(); }
+      catch(e) {
+        content.innerHTML = '<div class="probe-error">Error: ' + escHtml(e.message) + '</div>';
+        return;
+      }
       content.innerHTML = '<div class="probe-loading">Connecting to server...</div>';
       try {
         const res = await apiFetch('/api/probe', {
@@ -637,8 +676,10 @@ export const UI_HTML = `<!DOCTYPE html>
       if (server.url) {
         document.getElementById('serverUrl').value = server.url;
         document.getElementById('serverUseOAuth').checked = !!server.useOAuth;
+        document.getElementById('serverProxy').value = server.proxy || '';
         document.getElementById('serverHeaders').value = server.httpHeaders ? JSON.stringify(server.httpHeaders, null, 2) : '';
       } else {
+        document.getElementById('serverProxy').value = '';
         document.getElementById('serverCommand').value = server.command || '';
         document.getElementById('serverArgs').value = server.args ? JSON.stringify(server.args) : '';
         document.getElementById('serverEnv').value = server.env ? JSON.stringify(server.env, null, 2) : '';
@@ -706,6 +747,9 @@ export const UI_HTML = `<!DOCTYPE html>
         if (document.getElementById('serverUseOAuth').checked) {
           server.useOAuth = true;
         }
+        const proxy = parseProxyInput(document.getElementById('serverProxy').value);
+        if (proxy.error) { alert(proxy.error); return; }
+        if (proxy.value) server.proxy = proxy.value;
         const headers = document.getElementById('serverHeaders').value.trim();
         if (headers) {
           try { server.httpHeaders = JSON.parse(headers); }
